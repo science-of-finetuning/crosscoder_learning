@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.init as init
 from torch.nn.functional import relu
 import einops
+from warnings import warn
 
 
 class Dictionary(ABC, nn.Module):
@@ -558,6 +559,9 @@ class CrossCoder(Dictionary, nn.Module):
         Load a pretrained cross-coder from a file.
         """
         state_dict = th.load(path, map_location="cpu", weights_only=True)
+        if "encoder.weight" not in state_dict:
+            warn("Cross-coder state dict was saved while torch.compiled was enabled. Fixing...")
+            state_dict = {k.split("_orig_mod.")[1]: v for k, v in state_dict.items()}
         num_layers, activation_dim, dict_size = state_dict["encoder.weight"].shape
         cross_coder = cls(activation_dim, dict_size, num_layers)
         cross_coder.load_state_dict(state_dict)
