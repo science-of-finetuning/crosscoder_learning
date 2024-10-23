@@ -449,9 +449,7 @@ class CrossCoderDecoder(nn.Module):
                     th.empty(num_layers, dict_size, activation_dim)
                 )
             if norm_init_scale is not None:
-                raise NotImplementedError(
-                    "Normalized initialization not implemented for crosscoder"
-                )
+                weight = weight / weight.norm(dim=2, keepdim=True) * norm_init_scale
             self.weight = nn.Parameter(weight)
 
     def forward(
