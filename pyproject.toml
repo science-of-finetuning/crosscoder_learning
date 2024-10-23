@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+[tool.setuptools_scm]
+
+[project]
+dynamic = ["version"]
+name = "dictionary_learning"
+authors = [
+    {name = "Samuel Marks and Aaron Mueller"},
+]
+description = "A package for dictionary learning via sparse autoencoders on neural network activations"
+readme = "README.md"
+requires-python = ">=3.7"
+keywords = ["dictionary learning", "sparse autoencoder", "neural networks"]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "torch",
+    "nnsight",
+    "einops",
+]
+[project.urls]
+Homepage = "https://github.com/saprmarks/dictionary_learning"
+"Bug Tracker" = "https://github.com/saprmarks/dictionary_learning/issues"
+
