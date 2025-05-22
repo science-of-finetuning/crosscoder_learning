@@ -692,7 +692,7 @@ class CrossCoder(Dictionary, nn.Module):
         dict_size,
         num_layers,
         same_init_for_all_layers=False,
-        norm_init_scale: float | None = None,  # neel's default: 0.005
+        norm_init_scale: float | None = None, 
         init_with_transpose=True,
         encoder_layers: list[int] | None = None,
         latent_processor: Callable | None = None,
