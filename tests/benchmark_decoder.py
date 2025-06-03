@@ -1,5 +1,12 @@
 # tests/benchmark_decoder.py
-
+# %% [markdown]
+# # Decoder Benchmark Script
+#
+# This script benchmarks the performance of different decoder types (linear vs. EmbeddingBag)
+# for `BatchTopKSAE` and `BatchTopKCrossCoder` models. It also includes a weight equivalence
+# test to ensure numerical consistency between the decoder implementations.
+# %%
+# --- Imports and Setup ---
 import torch
 import torch.nn as nn
 import time
@@ -11,6 +18,7 @@ except ImportError:
     print("Error: Could not import from dictionary_learning. Ensure it's in PYTHONPATH.")
     raise
 
+# %%
 # --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
@@ -27,6 +35,7 @@ NUM_STEPS_WARMUP = 3
 BATCH_SIZE_INFER = 32
 NUM_STEPS_INFER = 30
 
+# %%
 # --- Helper Functions ---
 def generate_synthetic_data(
     num_batches: int, batch_size: int, activation_dim: int, device: torch.device, num_layers: Optional[int] = None
@@ -54,7 +63,9 @@ def test_weight_equivalence(
     model_linear = model_class(**args_linear).to(device)
 
     args_eb = {**common_model_args, "decoder_type": "embedding_bag"}
-    model_eb = model_class(**args_eb).to(device)
+    # Explicitly set use_sparse_decoder=True to match original intent, though it's the default
+    args_eb_explicit = {**args_eb, "use_sparse_decoder": True}
+    model_eb = model_class(**args_eb_explicit).to(device)
 
     model_eb.encoder.weight.data.copy_(model_linear.encoder.weight.data)
     if model_linear.encoder.bias is not None and model_eb.encoder.bias is not None:
@@ -218,6 +229,7 @@ def test_weight_equivalence(
     print(f"--- End Test {model_name} (Overall Equivalence: {final_test_result}) ---\n")
     return final_test_result
 
+# %%
 # --- Main Benchmarking Function ---
 def run_benchmarks():
     sae_args = {"activation_dim": ACTIVATION_DIM, "dict_size": DICT_SIZE, "k": K_SAE}
@@ -244,58 +256,98 @@ def run_benchmarks():
     for model_name, (model_class, model_base_args, is_cross_coder_flag) in model_configs_for_perf.items():
         print(f"\n-- Benchmarking {model_name} --")
         results[model_name] = {}
-        for decoder_type in ["linear", "embedding_bag"]:
-            print(f"  Decoder Type: {decoder_type}")
-            current_init_args = {**model_base_args, "decoder_type": decoder_type}
-            results[model_name][decoder_type] = {}
+
+        decoder_configs_to_test = []
+        base_decoder_types = ["linear", "embedding_bag"]
+
+        for dec_type in base_decoder_types:
+            if dec_type == "embedding_bag":
+                decoder_configs_to_test.append({"decoder_type": "embedding_bag", "use_sparse_decoder": True, "descriptive_name": "embedding_bag_sparse_true"})
+                decoder_configs_to_test.append({"decoder_type": "embedding_bag", "use_sparse_decoder": False, "descriptive_name": "embedding_bag_sparse_false"})
+            else:
+                decoder_configs_to_test.append({"decoder_type": "linear", "descriptive_name": "linear"})
+
+        for dec_config in decoder_configs_to_test:
+            descriptive_decoder_type = dec_config["descriptive_name"]
+            print(f"  Testing Configuration: {descriptive_decoder_type}")
+
+            current_init_args = {**model_base_args, "decoder_type": dec_config["decoder_type"]}
+            if "use_sparse_decoder" in dec_config:
+                current_init_args["use_sparse_decoder"] = dec_config["use_sparse_decoder"]
+
+            results[model_name][descriptive_decoder_type] = {}
 
             try:
                 model = model_class(**current_init_args).to(DEVICE)
             except Exception as e:
-                print(f"Error instantiating {model_name} with {decoder_type}: {e}")
-                results[model_name][decoder_type]["error_instantiation"] = str(e)
+                print(f"Error instantiating {model_name} with {descriptive_decoder_type}: {e}")
+                results[model_name][descriptive_decoder_type]["error_instantiation"] = str(e)
                 continue
 
-            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+            try:
+                trainable_params = [p for p in model.parameters() if p.requires_grad]
+                if not trainable_params:
+                    print(f"Warning: No trainable parameters found for {model_name} with {descriptive_decoder_type}. Skipping optimizer init and training.")
+                    optimizer = None
+                else:
+                    optimizer = torch.optim.AdamW(trainable_params, lr=1e-4) # type: ignore[arg-type]
+            except Exception as e:
+                print(f"Error creating optimizer for {model_name} {descriptive_decoder_type}: {e}")
+                results[model_name][descriptive_decoder_type]["error_optimizer"] = str(e)
+                continue
 
             model.train()
-            num_data_gen_layers_train = current_init_args.get("num_encoder_layers") if is_cross_coder_flag else None
-            train_data_loader = generate_synthetic_data(
-                NUM_STEPS_TRAIN + NUM_STEPS_WARMUP, BATCH_SIZE_TRAIN,
-                current_init_args["activation_dim"], DEVICE,
-                num_layers=num_data_gen_layers_train
-            )
-            try:
-                for _ in range(NUM_STEPS_WARMUP):
-                    x_batch = next(train_data_loader); optimizer.zero_grad()
-                    reconstruction = model(x_batch); loss = ((reconstruction - x_batch)**2).sum()
-                    loss.backward(); optimizer.step()
+            if optimizer: # Proceed with training benchmark only if optimizer was created
+                model.train()
+                num_data_gen_layers_train = current_init_args.get("num_encoder_layers") if is_cross_coder_flag else None
+                train_data_loader = generate_synthetic_data(
+                    NUM_STEPS_TRAIN + NUM_STEPS_WARMUP, BATCH_SIZE_TRAIN,
+                    current_init_args["activation_dim"], DEVICE,
+                    num_layers=num_data_gen_layers_train
+                )
+                try:
+                    for _ in range(NUM_STEPS_WARMUP):
+                        x_batch = next(train_data_loader); optimizer.zero_grad()
+                        reconstruction = model(x_batch); loss = ((reconstruction - x_batch)**2).sum()
+                        loss.backward(); optimizer.step()
 
-                if DEVICE.type == 'cuda': torch.cuda.synchronize()
-                start_time_train = time.perf_counter()
-                for _ in range(NUM_STEPS_TRAIN):
-                    x_batch = next(train_data_loader); optimizer.zero_grad()
-                    reconstruction = model(x_batch); loss = ((reconstruction - x_batch)**2).sum()
-                    loss.backward(); optimizer.step()
-                if DEVICE.type == 'cuda': torch.cuda.synchronize()
-                end_time_train = time.perf_counter()
-                avg_time_train = (end_time_train - start_time_train) / NUM_STEPS_TRAIN
-                results[model_name][decoder_type]["train_step_time_ms"] = avg_time_train * 1000
-                print(f"    Avg Training Step Time: {avg_time_train*1000:.3f} ms")
-            except Exception as e:
-                print(f"Error during training benchmark for {model_name} {decoder_type}: {e}")
-                results[model_name][decoder_type]["train_step_time_ms"] = "Error: " + str(e)
+                    if DEVICE.type == 'cuda': torch.cuda.synchronize()
+                    start_time_train = time.perf_counter()
+                    for _ in range(NUM_STEPS_TRAIN):
+                        x_batch = next(train_data_loader); optimizer.zero_grad()
+                        reconstruction = model(x_batch); loss = ((reconstruction - x_batch)**2).sum()
+                        loss.backward(); optimizer.step()
+                    if DEVICE.type == 'cuda': torch.cuda.synchronize()
+                    end_time_train = time.perf_counter()
+                    avg_time_train = (end_time_train - start_time_train) / NUM_STEPS_TRAIN
+                    results[model_name][descriptive_decoder_type]["train_step_time_ms"] = avg_time_train * 1000
+                    print(f"    Avg Training Step Time: {avg_time_train*1000:.3f} ms")
+                except Exception as e:
+                    print(f"Error during training benchmark for {model_name} {descriptive_decoder_type}: {e}")
+                    results[model_name][descriptive_decoder_type]["train_step_time_ms"] = "Error: " + str(e)
+            else: # No optimizer, skip training benchmark
+                print(f"    Skipping training benchmark for {model_name} {descriptive_decoder_type} (no trainable parameters or optimizer error).")
+                results[model_name][descriptive_decoder_type]["train_step_time_ms"] = "Skipped - No Optimizer"
 
-            model.eval()
+
+            model.eval() # Ensure model is in eval mode for inference benchmarks
             with torch.no_grad():
                 num_data_gen_layers_infer = current_init_args.get("num_encoder_layers") if is_cross_coder_flag else None
+                # Benchmark for decode-only
                 try:
-                    sample_dense_input_for_encode = next(generate_synthetic_data(
+                    # Generate one batch of features by encoding first
+                    # This ensures the features_for_decode_batch has the correct structure and device
+                    sample_input_for_encode_once = next(generate_synthetic_data(
                         1, BATCH_SIZE_INFER, current_init_args["activation_dim"], DEVICE,
                         num_layers=num_data_gen_layers_infer
                     ))
-                    encode_output = model.encode(sample_dense_input_for_encode, return_active=True)
-                    features_for_decode_batch = (encode_output[0] if isinstance(encode_output, tuple) else encode_output).detach()
+                    # The model.encode might return tuple, ensure to get the tensor part
+                    encoded_output_once = model.encode(sample_input_for_encode_once) # Remove return_active=True if not always used or needed
+                    if isinstance(encoded_output_once, tuple): # Handle if encode returns tuple (e.g. with active indices)
+                         features_for_decode_batch = encoded_output_once[0].detach()
+                    else:
+                         features_for_decode_batch = encoded_output_once.detach()
+
                     for _ in range(NUM_STEPS_WARMUP): model.decode(features_for_decode_batch)
                     if DEVICE.type == 'cuda': torch.cuda.synchronize()
                     start_time_infer_decode = time.perf_counter()
@@ -303,30 +355,32 @@ def run_benchmarks():
                     if DEVICE.type == 'cuda': torch.cuda.synchronize()
                     end_time_infer_decode = time.perf_counter()
                     avg_time_infer_decode = (end_time_infer_decode - start_time_infer_decode) / NUM_STEPS_INFER
-                    results[model_name][decoder_type]["infer_decode_time_ms"] = avg_time_infer_decode * 1000
+                    results[model_name][descriptive_decoder_type]["infer_decode_time_ms"] = avg_time_infer_decode * 1000
                     print(f"    Avg Inference (decode only) Time: {avg_time_infer_decode*1000:.3f} ms")
                 except Exception as e:
-                    print(f"Error during decode-only inference for {model_name} {decoder_type}: {e}")
-                    results[model_name][decoder_type]["infer_decode_time_ms"] = "Error: " + str(e)
+                    print(f"Error during decode-only inference for {model_name} {descriptive_decoder_type}: {e}")
+                    results[model_name][descriptive_decoder_type]["infer_decode_time_ms"] = "Error: " + str(e)
 
+                # Benchmark for full model (encode + decode)
                 try:
                     infer_full_data_loader = generate_synthetic_data(
                         NUM_STEPS_INFER + NUM_STEPS_WARMUP, BATCH_SIZE_INFER,
                         current_init_args["activation_dim"], DEVICE,
                         num_layers=num_data_gen_layers_infer
                     )
-                    for _ in range(NUM_STEPS_WARMUP): model(next(infer_full_data_loader))
+                    for _ in range(NUM_STEPS_WARMUP): model(next(infer_full_data_loader)) # type: ignore
                     if DEVICE.type == 'cuda': torch.cuda.synchronize()
                     start_time_infer_full = time.perf_counter()
-                    for _ in range(NUM_STEPS_INFER): model(next(infer_full_data_loader))
+                    for _ in range(NUM_STEPS_INFER): model(next(infer_full_data_loader)) # type: ignore
                     if DEVICE.type == 'cuda': torch.cuda.synchronize()
                     end_time_infer_full = time.perf_counter()
                     avg_time_infer_full = (end_time_infer_full - start_time_infer_full) / NUM_STEPS_INFER
-                    results[model_name][decoder_type]["infer_full_model_time_ms"] = avg_time_infer_full * 1000
+                    results[model_name][descriptive_decoder_type]["infer_full_model_time_ms"] = avg_time_infer_full * 1000
                     print(f"    Avg Inference (encode-decode) Time: {avg_time_infer_full*1000:.3f} ms")
                 except Exception as e:
-                    print(f"Error during full inference for {model_name} {decoder_type}: {e}")
-                    results[model_name][decoder_type]["infer_full_model_time_ms"] = "Error: " + str(e)
+                    print(f"Error during full inference for {model_name} {descriptive_decoder_type}: {e}")
+                    results[model_name][descriptive_decoder_type]["infer_full_model_time_ms"] = "Error: " + str(e)
+
 
     print("\n--- Benchmark Summary ---")
     for model_name_sum, model_results in results.items():
@@ -340,5 +394,83 @@ def run_benchmarks():
             else: print(f"      Error: {times}")
     print("--- Benchmarking Script Complete ---")
 
+# %%
+# --- Run Benchmarks ---
 if __name__ == "__main__":
-    run_benchmarks()
+    # Store results globally for plotting if needed, or pass around
+    benchmark_results_global = run_benchmarks()
+
+# %%
+# --- Plotting Results ---
+import matplotlib.pyplot as plt
+import numpy as np
+
+if __name__ == "__main__":
+    if 'benchmark_results_global' in locals() and benchmark_results_global:
+        print("\n--- Generating Benchmark Plots ---")
+        results_to_plot = benchmark_results_global # Use the global variable
+
+        model_names = list(results_to_plot.keys())
+
+        # Define the configurations we expect to plot, corresponds to descriptive_decoder_type
+        decoder_configs_plot_order = ["linear", "embedding_bag_sparse_true", "embedding_bag_sparse_false"]
+
+        metrics_to_plot = [
+            ("train_step_time_ms", "Avg Training Step Time (ms)"),
+            ("infer_decode_time_ms", "Avg Inference (Decode Only) Time (ms)"),
+            ("infer_full_model_time_ms", "Avg Inference (Encode-Decode) Time (ms)")
+        ]
+
+        for model_name_plt in model_names:
+            print(f"  Plotting for model: {model_name_plt}")
+            model_data = results_to_plot.get(model_name_plt, {})
+
+            num_metrics = len(metrics_to_plot)
+            num_configs = len(decoder_configs_plot_order)
+
+            bar_width = 0.25
+            fig_height = 5 * num_metrics
+            # Try to create a subplot for each metric for a given model
+            # Or, create separate figures for each metric for clarity
+
+            for i, (metric_key, metric_label) in enumerate(metrics_to_plot):
+                plt.figure(figsize=(10, 6)) # Create a new figure for each metric
+
+                values_for_metric = []
+                actual_configs_plotted = []
+
+                for config_name in decoder_configs_plot_order:
+                    config_data = model_data.get(config_name, {})
+                    value = config_data.get(metric_key)
+
+                    if isinstance(value, (float, int)):
+                        values_for_metric.append(value)
+                        actual_configs_plotted.append(config_name)
+                    elif isinstance(value, str) and "Error" in value:
+                        print(f"    Warning: Error recorded for {model_name_plt}, {config_name}, {metric_key}: {value}. Plotting as 0.")
+                        values_for_metric.append(0) # Plot errors as 0
+                        actual_configs_plotted.append(config_name + " (Error)")
+                    elif isinstance(value, str) and "Skipped" in value:
+                        print(f"    Info: Skipped data for {model_name_plt}, {config_name}, {metric_key}: {value}. Plotting as 0.")
+                        values_for_metric.append(0) # Plot skipped as 0
+                        actual_configs_plotted.append(config_name + " (Skipped)")
+                    else:
+                        # Handle cases where a config might be missing entirely for a metric (e.g. if instantiation failed)
+                        print(f"    Warning: Missing data for {model_name_plt}, {config_name}, {metric_key}. Plotting as 0.")
+                        values_for_metric.append(0)
+                        actual_configs_plotted.append(config_name + " (Missing)")
+
+
+                x = np.arange(len(actual_configs_plotted))
+
+                plt.bar(x, values_for_metric, bar_width, label=metric_label)
+
+                plt.ylabel('Time (ms)')
+                plt.title(f'{model_name_plt} - {metric_label}')
+                plt.xticks(x, actual_configs_plotted, rotation=15, ha="right")
+                plt.legend()
+                plt.tight_layout()
+                plt.show()
+        print("--- Plotting Complete ---")
+    else:
+        print("\nNo benchmark results to plot (or script not run as main).")

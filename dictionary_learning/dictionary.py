@@ -51,44 +51,27 @@ class AutoEncoder(Dictionary, nn.Module):
     def encode(self, x): return nn.ReLU()(self.encoder(x - self.bias))
     def decode(self, f): return self.decoder(f) + self.bias
 
-    def forward(self, x, output_features=False, ghost_mask=None):
-        if ghost_mask is None:
-            f = self.encode(x)
-            x_hat = self.decode(f)
-            return (x_hat, f) if output_features else x_hat
-        else:
-            f_pre = self.encoder(x-self.bias)
-            f_ghost = th.exp(f_pre) * ghost_mask.to(f_pre)
-            f = nn.ReLU()(f_pre)
-            x_ghost = self.decoder(f_ghost)
-            x_hat = self.decode(f)
-            return (x_hat, x_ghost, f) if output_features else (x_hat, x_ghost)
+    def forward(self, x, output_features=False):
+        f = self.encode(x)
+        x_hat = self.decode(f)
+        return (x_hat, f) if output_features else x_hat
 
     @classmethod
     def from_pretrained(cls, path_or_model_id, dtype=th.float32, from_hub=False, device=None, config=None, **kwargs ) -> "AutoEncoder":
         cfg = config if config is not None else kwargs.get("config", {})
-        act_dim = kwargs.get("activation_dim", cfg.get("activation_dim"))
-        dct_size = kwargs.get("dict_size", cfg.get("dict_size"))
+        act_dim = cfg.get("activation_dim", kwargs.get("activation_dim"))
+        dct_size = cfg.get("dict_size", kwargs.get("dict_size"))
 
-        if not all([act_dim, dct_size]):
-            if not from_hub and path_or_model_id:
-                try:
-                    sd = th.load(path_or_model_id, map_location='cpu', weights_only=True)
-                    dec_w_shape = sd.get('decoder.weight.shape', sd.get('decoder.weight').shape)
-                    act_dim_sd, dct_size_sd = dec_w_shape[0], dec_w_shape[1]
-                    if act_dim is None: act_dim = act_dim_sd
-                    if dct_size is None: dct_size = dct_size_sd
-                except Exception as e:
-                    raise ValueError(f"Could not load/infer params from local state_dict {path_or_model_id} for AutoEncoder: {e}")
-            if not all([act_dim, dct_size]):
-                raise ValueError("activation_dim, dict_size must be provided in config or kwargs for AutoEncoder.")
+        if act_dim is None or dct_size is None:
+            raise ValueError("activation_dim and dict_size must be provided in config or kwargs for AutoEncoder.")
 
-        cfg.update({"activation_dim": act_dim, "dict_size": dct_size})
+        model_config = {"activation_dim": act_dim, "dict_size": dct_size}
+        cfg.update(model_config) # Ensure cfg for super().from_pretrained is complete
 
         if from_hub:
             model = super(AutoEncoder, cls).from_pretrained(path_or_model_id, config=cfg, **kwargs) # type: ignore
         else:
-            instance = cls(activation_dim=act_dim, dict_size=dct_size)
+            instance = cls(**model_config) # type: ignore
             state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
             if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
             instance.load_state_dict(state_dict)
@@ -177,25 +160,21 @@ class GatedAutoEncoder(Dictionary, nn.Module):
     @classmethod
     def from_pretrained(cls, path_or_model_id, from_hub=False, device=None, dtype=th.float32, config=None, **kwargs):
         cfg = config if config is not None else kwargs.get("config", {})
-        act_dim = kwargs.get("activation_dim", cfg.get("activation_dim"))
-        dct_size = kwargs.get("dict_size", cfg.get("dict_size"))
-        initialization = cfg.get("initialization_type", "default")
+        act_dim = cfg.get("activation_dim", kwargs.get("activation_dim"))
+        dct_size = cfg.get("dict_size", kwargs.get("dict_size"))
+        initialization = cfg.get("initialization_type", kwargs.get("initialization", "default")) # Allow kwarg 'initialization' too
 
-        if not all([act_dim, dct_size]):
-            if not from_hub and path_or_model_id:
-                try:
-                    sd = th.load(path_or_model_id, map_location='cpu', weights_only=True)
-                    act_dim_sd, dct_size_sd = sd["decoder.weight"].shape[0], sd["decoder.weight"].shape[1]
-                    if act_dim is None: act_dim = act_dim_sd
-                    if dct_size is None: dct_size = dct_size_sd
-                except Exception as e:
-                    raise ValueError(f"Could not load/infer params from local state_dict {path_or_model_id} for GatedAutoEncoder: {e}")
-            if not all([act_dim, dct_size]):
-                raise ValueError("activation_dim, dict_size required for GatedAutoEncoder.")
-        cfg.update({"activation_dim":act_dim, "dict_size":dct_size, "initialization_type": initialization})
+        if act_dim is None or dct_size is None:
+            raise ValueError("activation_dim and dict_size must be provided in config or kwargs for GatedAutoEncoder.")
+
+        model_config = {"activation_dim": act_dim, "dict_size": dct_size, "initialization_type": initialization}
+        cfg.update(model_config) # Ensure cfg for super().from_pretrained is complete
+
         if from_hub:
+            # Pass initialization directly as it's part of constructor, not just config for hub mixin
             model = super(GatedAutoEncoder, cls).from_pretrained(path_or_model_id, config=cfg, initialization=initialization, **kwargs) # type: ignore
         else:
+            # Pass device to constructor for local instantiation
             instance = cls(activation_dim=act_dim, dict_size=dct_size, initialization=initialization, device=device)
             state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
             if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
@@ -242,48 +221,41 @@ class JumpReluAutoEncoder(Dictionary, nn.Module):
     @classmethod
     def from_pretrained(cls, path_or_model_id, from_hub=False, device=None, dtype=th.float32, config=None, load_from_sae_lens=False, **kwargs):
         cfg = config if config is not None else kwargs.get("config", {})
-        act_dim = kwargs.get("activation_dim", cfg.get("activation_dim"))
-        dct_size = kwargs.get("dict_size", cfg.get("dict_size"))
-        apply_b_dec_to_input_cfg = cfg.get("apply_b_dec_to_input", False)
-        if load_from_sae_lens:
-            try: from sae_lens import SAE
-            except ImportError: raise ImportError("sae_lens package not found. Please install it to load from SAE Lens checkpoints.")
-            sae_kwargs = {k:v for k,v in kwargs.items() if k not in ['activation_dim', 'dict_size', 'config', 'load_from_sae_lens', 'apply_b_dec_to_input']}
-            if device: sae_kwargs['device'] = str(device)
-            sae, cfg_dict_sl, _ = SAE.from_pretrained(path_or_model_id, **sae_kwargs)
-            act_dim = cfg_dict_sl["d_in"]
-            dct_size = cfg_dict_sl["d_sae"]
-            instance = cls(activation_dim=act_dim, dict_size=dct_size, device=sae.device)
-            sae_state_dict = sae.state_dict()
-            new_state_dict = {
-                'W_enc': sae_state_dict['W_enc'].T, 'b_enc': sae_state_dict['b_enc'],
-                'W_dec': sae_state_dict['W_dec'].T, 'b_dec': sae_state_dict['b_dec'],}
-            if 'scaling_factor' in sae_state_dict:
-                warn("SAE Lens 'scaling_factor' found but not used for 'threshold' in JumpReluAutoEncoder.")
-            instance.load_state_dict(new_state_dict, strict=False)
-            instance.apply_b_dec_to_input = cfg_dict_sl.get("apply_b_dec_to_input", apply_b_dec_to_input_cfg)
-            model = instance
+        # Removed load_from_sae_lens conditional block
+        act_dim = cfg.get("activation_dim", kwargs.get("activation_dim"))
+        dct_size = cfg.get("dict_size", kwargs.get("dict_size"))
+        apply_b_dec_to_input_cfg = cfg.get("apply_b_dec_to_input", kwargs.get("apply_b_dec_to_input", False))
+
+        if act_dim is None or dct_size is None:
+            raise ValueError("activation_dim and dict_size must be provided in config or kwargs for JumpReluAutoEncoder.")
+
+        model_config = {
+            "activation_dim": act_dim,
+            "dict_size": dct_size,
+            # apply_b_dec_to_input is a model attribute, not a config for hub mixin in the same way.
+            # It will be set on the instance later if loaded locally, or should be handled by the model's __init__ if from hub.
+        }
+        # Update cfg for hub loading, but ensure apply_b_dec_to_input is part of the config for hub.
+        cfg_for_hub = cfg.copy()
+        cfg_for_hub.update(model_config)
+        cfg_for_hub["apply_b_dec_to_input"] = apply_b_dec_to_input_cfg
+
+
+        if from_hub:
+            model = super(JumpReluAutoEncoder, cls).from_pretrained(path_or_model_id, config=cfg_for_hub, **kwargs) # type: ignore
+            # If apply_b_dec_to_input was part of the saved config, HubMixin should handle it.
+            # If it's a direct attribute not in config, it might need explicit setting if not handled by __init__.
+            # Assuming __init__ or a post-load hook handles it for hub models.
+            # For consistency, explicitly set it if provided in kwargs or config after loading.
+            if hasattr(model, 'apply_b_dec_to_input'): # Check if the attribute exists
+                 model.apply_b_dec_to_input = apply_b_dec_to_input_cfg
         else:
-            if not all([act_dim, dct_size]):
-                if not from_hub and path_or_model_id:
-                    try:
-                        sd = th.load(path_or_model_id, map_location='cpu', weights_only=True)
-                        act_dim_sd, dct_size_sd = sd["W_enc"].shape[0], sd["W_enc"].shape[1]
-                        if act_dim is None: act_dim = act_dim_sd
-                        if dct_size is None: dct_size = dct_size_sd
-                    except Exception as e:
-                         raise ValueError(f"Could not load/infer params from local state_dict {path_or_model_id} for JumpReluAutoEncoder: {e}")
-                if not all([act_dim, dct_size]):
-                    raise ValueError("activation_dim, dict_size required for JumpReluAutoEncoder.")
-            cfg.update({"activation_dim":act_dim, "dict_size":dct_size, "apply_b_dec_to_input": apply_b_dec_to_input_cfg})
-            if from_hub:
-                model = super(JumpReluAutoEncoder, cls).from_pretrained(path_or_model_id, config=cfg, **kwargs) # type: ignore
-            else:
-                instance = cls(activation_dim=act_dim, dict_size=dct_size, device=device if device else "cpu")
-                state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
-                if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
-                instance.load_state_dict(state_dict)
-                model = instance
+            instance = cls(activation_dim=act_dim, dict_size=dct_size, device=device if device else "cpu")
+            instance.apply_b_dec_to_input = apply_b_dec_to_input_cfg # Set directly on the instance
+            state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
+            if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
+            instance.load_state_dict(state_dict)
+            model = instance
         model.to(dtype=dtype) # type: ignore
         if device: model.to(device) # type: ignore
         return model # type: ignore
@@ -319,24 +291,19 @@ class AutoEncoderNew(Dictionary, nn.Module):
     @classmethod
     def from_pretrained(cls, path_or_model_id, from_hub=False, device=None, dtype=th.float32, config=None, **kwargs):
         cfg = config if config is not None else kwargs.get("config", {})
-        act_dim = kwargs.get("activation_dim", cfg.get("activation_dim"))
-        dct_size = kwargs.get("dict_size", cfg.get("dict_size"))
-        if not all([act_dim, dct_size]):
-            if not from_hub and path_or_model_id:
-                try:
-                    sd = th.load(path_or_model_id, map_location='cpu', weights_only=True)
-                    dct_size_sd, act_dim_sd = sd["encoder.weight"].shape
-                    if act_dim is None: act_dim = act_dim_sd
-                    if dct_size is None: dct_size = dct_size_sd
-                except Exception as e:
-                    raise ValueError(f"Could not load/infer params from local state_dict {path_or_model_id} for AutoEncoderNew: {e}")
-            if not all([act_dim, dct_size]):
-                raise ValueError("activation_dim, dict_size required for AutoEncoderNew.")
-        cfg.update({"activation_dim":act_dim, "dict_size":dct_size})
+        act_dim = cfg.get("activation_dim", kwargs.get("activation_dim"))
+        dct_size = cfg.get("dict_size", kwargs.get("dict_size"))
+
+        if act_dim is None or dct_size is None:
+            raise ValueError("activation_dim and dict_size must be provided in config or kwargs for AutoEncoderNew.")
+
+        model_config = {"activation_dim": act_dim, "dict_size": dct_size}
+        cfg.update(model_config) # Ensure cfg for super().from_pretrained is complete
+
         if from_hub:
             model = super(AutoEncoderNew, cls).from_pretrained(path_or_model_id, config=cfg, **kwargs) # type: ignore
         else:
-            instance = cls(activation_dim=act_dim, dict_size=dct_size)
+            instance = cls(**model_config) # type: ignore
             state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
             if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
             instance.load_state_dict(state_dict)
@@ -346,13 +313,22 @@ class AutoEncoderNew(Dictionary, nn.Module):
         return model # type: ignore
 
 class BatchTopKSAE(Dictionary, nn.Module):
-    def __init__(self, activation_dim: int, dict_size: int, k: int, decoder_type: str = "linear"):
+    def __init__(self, activation_dim: int, dict_size: int, k: int, decoder_type: str = "linear", use_sparse_decoder: bool = True):
         super().__init__()
+        assert isinstance(activation_dim, int) and activation_dim > 0, "activation_dim must be a positive integer"
+        assert isinstance(dict_size, int) and dict_size > 0, "dict_size must be a positive integer"
+        assert isinstance(k, int) and k > 0, f"k={k} must be a positive integer"
+        assert decoder_type in ["linear", "embedding_bag"], f"decoder_type must be 'linear' or 'embedding_bag', got {decoder_type}"
+        assert isinstance(use_sparse_decoder, bool), "use_sparse_decoder must be a boolean"
+
         self.activation_dim = activation_dim
         self.dict_size = dict_size
         self.decoder_type = decoder_type
-        self._hub_mixin_config = {"activation_dim": activation_dim, "dict_size": dict_size, "k": k, "decoder_type": decoder_type}
-        assert isinstance(k, int) and k > 0, f"k={k} must be a positive integer"
+        self.use_sparse_decoder = use_sparse_decoder
+        self._hub_mixin_config = {
+            "activation_dim": activation_dim, "dict_size": dict_size, "k": k,
+            "decoder_type": decoder_type, "use_sparse_decoder": use_sparse_decoder
+        }
         self.register_buffer("k", th.tensor(k, dtype=th.int))
         self.register_buffer("threshold", th.tensor(-1.0, dtype=th.float32))
         if self.decoder_type == "linear":
@@ -365,7 +341,7 @@ class BatchTopKSAE(Dictionary, nn.Module):
             temp_decoder_linear.weight.data = set_decoder_norm_to_unit_norm(temp_decoder_linear.weight, activation_dim, dict_size)
             self.encoder = nn.Linear(activation_dim, dict_size, bias=True)
             self.encoder.weight.data = temp_decoder_linear.weight.T.clone()
-            self.decoder = nn.EmbeddingBag(dict_size, activation_dim, mode="sum", sparse=True)
+            self.decoder = nn.EmbeddingBag(dict_size, activation_dim, mode="sum", sparse=self.use_sparse_decoder)
             self.decoder.weight = nn.Parameter(temp_decoder_linear.weight.T.clone())
         else:
             raise ValueError(f"Unknown decoder_type: {decoder_type}")
@@ -431,30 +407,36 @@ class BatchTopKSAE(Dictionary, nn.Module):
 
     @classmethod
     def from_pretrained( cls, path_or_model_id, from_hub=False, device=None, dtype=th.float32, config=None, **kwargs ) -> "BatchTopKSAE":
-        cfg_init = config if config is not None else kwargs.get("config", {})
-        act_dim = kwargs.get("activation_dim", cfg_init.get("activation_dim"))
-        dct_size = kwargs.get("dict_size", cfg_init.get("dict_size"))
-        k_val = kwargs.get("k", cfg_init.get("k"))
-        dec_type = kwargs.get("decoder_type", cfg_init.get("decoder_type", "linear"))
-        if not all([act_dim, dct_size, k_val is not None]):
-            if not from_hub and path_or_model_id:
-                try:
-                    sd = th.load(path_or_model_id, map_location='cpu', weights_only=True)
-                    if "_hub_mixin_config" in sd : cfg_init.update(sd["_hub_mixin_config"])
-                    if act_dim is None: act_dim = cfg_init.get("activation_dim")
-                    if dct_size is None: dct_size = cfg_init.get("dict_size")
-                    if k_val is None: k_val = cfg_init.get("k")
-                    if dec_type is None: dec_type = cfg_init.get("decoder_type", "linear")
-                    if k_val is None and 'k' in sd : k_val = sd['k'].item()
-                except Exception as e:
-                    raise ValueError(f"Could not load/infer params from local state_dict {path_or_model_id} for BatchTopKSAE: {e}")
-            if not all([act_dim, dct_size, k_val is not None]):
-                 raise ValueError("activation_dim, dict_size, k must be provided for BatchTopKSAE.")
-        cfg_init.update({"activation_dim": act_dim, "dict_size": dct_size, "k": k_val, "decoder_type": dec_type})
+        cfg = config if config is not None else kwargs.get("config", {})
+        act_dim = cfg.get("activation_dim", kwargs.get("activation_dim"))
+        dct_size = cfg.get("dict_size", kwargs.get("dict_size"))
+        k_val = cfg.get("k", kwargs.get("k"))
+        dec_type = cfg.get("decoder_type", kwargs.get("decoder_type", "linear"))
+        use_sparse = cfg.get("use_sparse_decoder", kwargs.get("use_sparse_decoder", True))
+
+
+        if act_dim is None or dct_size is None or k_val is None:
+            raise ValueError("activation_dim, dict_size, and k must be provided in config or kwargs for BatchTopKSAE.")
+
+        model_config = {
+            "activation_dim": act_dim,
+            "dict_size": dct_size,
+            "k": k_val,
+            "decoder_type": dec_type,
+            "use_sparse_decoder": use_sparse,
+        }
+        cfg.update(model_config) # Ensure cfg for super().from_pretrained is complete
+
         if from_hub:
-            model = super(BatchTopKSAE, cls).from_pretrained(path_or_model_id, config=cfg_init, **kwargs) # type: ignore
+            # Pass model_config directly to constructor when loading from hub if it matches constructor args
+            # However, super().from_pretrained expects config for its own processing.
+            # The instance will be created by the HubMixin's logic using the 'config' dict.
+            model = super(BatchTopKSAE, cls).from_pretrained(path_or_model_id, config=cfg, **kwargs) # type: ignore
+            # Ensure use_sparse_decoder is set if it was part of the loaded config and __init__ handles it
+            if hasattr(model, 'use_sparse_decoder') and 'use_sparse_decoder' not in kwargs: # if not explicitly overridden by a kwarg
+                model.use_sparse_decoder = use_sparse # Set from config if not in direct kwargs
         else:
-            instance = cls(activation_dim=act_dim, dict_size=dct_size, k=k_val, decoder_type=dec_type) # type: ignore
+            instance = cls(**model_config) # type: ignore
             state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
             if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
             instance.load_state_dict(state_dict)
@@ -468,13 +450,27 @@ class CrossCoderEncoder(nn.Module):
                   same_init_for_all_layers: bool = False, norm_init_scale: float | None = None,
                   encoder_layers_indices: list[int] | None = None ):
         super().__init__()
+        assert isinstance(activation_dim, int) and activation_dim > 0, "activation_dim must be a positive integer"
+        assert isinstance(dict_size, int) and dict_size > 0, "dict_size must be a positive integer"
+
         if encoder_layers_indices is None:
-            if num_layers is None: raise ValueError("num_layers or encoder_layers_indices must be given.")
+            assert num_layers is not None and isinstance(num_layers, int) and num_layers > 0, \
+                "num_layers must be a positive integer if encoder_layers_indices is None"
             self.encoder_layers_indices = list(range(num_layers))
             self.num_encoder_matrices = num_layers
         else:
+            assert isinstance(encoder_layers_indices, list) and len(encoder_layers_indices) > 0, \
+                "encoder_layers_indices must be a non-empty list if provided"
+            assert all(isinstance(i, int) and i >= 0 for i in encoder_layers_indices), \
+                "all elements in encoder_layers_indices must be non-negative integers"
             self.encoder_layers_indices = encoder_layers_indices
             self.num_encoder_matrices = len(encoder_layers_indices)
+            if num_layers is not None:
+                 assert num_layers == self.num_encoder_matrices, \
+                     "if both num_layers and encoder_layers_indices are provided, num_layers must match len(encoder_layers_indices)"
+
+        assert self.num_encoder_matrices > 0, "Number of encoder matrices must be positive."
+
         self.activation_dim = activation_dim; self.dict_size = dict_size
         if same_init_for_all_layers:
             w_single = init.kaiming_uniform_(th.empty(activation_dim, dict_size))
@@ -496,15 +492,25 @@ class CrossCoderEncoder(nn.Module):
 class CrossCoderDecoder(nn.Module):
     def __init__( self, activation_dim: int, dict_size: int, num_output_layers: int,
                   decoder_type: str = "linear", same_init_for_all_layers: bool = False,
-                  norm_init_scale: float | None = None, init_with_weight: th.Tensor | None = None ):
+                  norm_init_scale: float | None = None, init_with_weight: th.Tensor | None = None,
+                  use_sparse_decoder: bool = True ):
         super().__init__()
+        assert isinstance(activation_dim, int) and activation_dim > 0, "activation_dim must be a positive integer"
+        assert isinstance(dict_size, int) and dict_size > 0, "dict_size must be a positive integer"
+        assert isinstance(num_output_layers, int) and num_output_layers > 0, "num_output_layers must be a positive integer"
+        assert decoder_type in ["linear", "embedding_bag"], f"decoder_type must be 'linear' or 'embedding_bag', got {decoder_type}"
+        assert isinstance(use_sparse_decoder, bool), "use_sparse_decoder must be a boolean"
+
         self.activation_dim = activation_dim; self.dict_size = dict_size
         self.num_output_layers = num_output_layers; self.decoder_type = decoder_type
+        self.use_sparse_decoder = use_sparse_decoder # Store the attribute
         self.bias = nn.Parameter(th.zeros(num_output_layers, activation_dim))
+
         if self.decoder_type == "linear":
             if init_with_weight is not None:
-                if init_with_weight.shape != (num_output_layers, dict_size, activation_dim):
-                    raise ValueError(f"init_with_weight shape {init_with_weight.shape} incompatible.")
+                assert isinstance(init_with_weight, th.Tensor), "init_with_weight must be a Tensor for linear decoder"
+                assert init_with_weight.shape == (num_output_layers, dict_size, activation_dim), \
+                    f"init_with_weight shape {init_with_weight.shape} incompatible with ({num_output_layers}, {dict_size}, {activation_dim})"
                 self.weight = nn.Parameter(init_with_weight.clone())
             else:
                 if same_init_for_all_layers:
@@ -518,10 +524,11 @@ class CrossCoderDecoder(nn.Module):
         elif self.decoder_type == "embedding_bag":
             self.layers = nn.ModuleList()
             for i in range(num_output_layers):
-                eb_layer = nn.EmbeddingBag(dict_size, activation_dim, mode="sum", sparse=True)
+                eb_layer = nn.EmbeddingBag(dict_size, activation_dim, mode="sum", sparse=self.use_sparse_decoder)
                 if init_with_weight is not None:
-                    if init_with_weight.shape != (num_output_layers, dict_size, activation_dim):
-                         raise ValueError(f"init_with_weight shape {init_with_weight.shape} incompatible for EB layers.")
+                    assert isinstance(init_with_weight, th.Tensor), "init_with_weight must be a Tensor for embedding_bag decoder"
+                    assert init_with_weight.shape == (num_output_layers, dict_size, activation_dim), \
+                        f"init_with_weight shape {init_with_weight.shape} incompatible for EB layers with ({num_output_layers}, {dict_size}, {activation_dim})"
                     eb_layer.weight = nn.Parameter(init_with_weight[i].clone())
                 else:
                     temp_eb_w = init.kaiming_uniform_(th.empty(dict_size, activation_dim))
@@ -583,14 +590,47 @@ class CrossCoder(Dictionary, nn.Module):
         code_normalization: Union[CodeNormalization, str] = CodeNormalization.CROSSCODER,
         code_normalization_alpha_sae: float = 1.0,
         code_normalization_alpha_cc: float = 0.1,
+        use_sparse_decoder: bool = True,
     ):
         super().__init__()
-        _num_enc_matrices = len(encoder_layers_indices) if encoder_layers_indices is not None else num_encoder_layers
-        _actual_encoder_indices = encoder_layers_indices if encoder_layers_indices is not None else list(range(num_encoder_layers))
-        _num_dec_out_layers = num_decoder_output_layers if num_decoder_output_layers is not None else _num_enc_matrices
+        assert isinstance(activation_dim, int) and activation_dim > 0, "activation_dim must be a positive integer"
+        assert isinstance(dict_size, int) and dict_size > 0, "dict_size must be a positive integer"
+        assert isinstance(num_encoder_layers, int) and num_encoder_layers > 0, "num_encoder_layers must be a positive integer"
+        assert decoder_type in ["linear", "embedding_bag"], f"decoder_type must be 'linear' or 'embedding_bag', got {decoder_type}"
+        assert isinstance(use_sparse_decoder, bool), "use_sparse_decoder must be a boolean"
+        if isinstance(code_normalization, str): # Check before converting
+            try: CodeNormalization.from_string(code_normalization) # Ensure it's a valid enum name
+            except ValueError: raise ValueError(f"Invalid code_normalization string: {code_normalization}")
+        elif not isinstance(code_normalization, CodeNormalization):
+             raise TypeError(f"code_normalization must be a string or CodeNormalization enum, got {type(code_normalization)}")
+
+        if encoder_layers_indices is not None:
+            assert isinstance(encoder_layers_indices, list) and len(encoder_layers_indices) > 0, \
+                "encoder_layers_indices must be a non-empty list if provided"
+            assert all(isinstance(i, int) and i >= 0 for i in encoder_layers_indices), \
+                "all elements in encoder_layers_indices must be non-negative integers"
+            _num_enc_matrices = len(encoder_layers_indices)
+            assert _num_enc_matrices == num_encoder_layers, \
+                "num_encoder_layers must match len(encoder_layers_indices) if encoder_layers_indices is provided"
+            _actual_encoder_indices = encoder_layers_indices
+        else:
+            _num_enc_matrices = num_encoder_layers
+            _actual_encoder_indices = list(range(num_encoder_layers))
+
+        assert _num_enc_matrices > 0, "_num_enc_matrices must be positive."
+
+        if num_decoder_output_layers is not None:
+            assert isinstance(num_decoder_output_layers, int) and num_decoder_output_layers > 0, \
+                "num_decoder_output_layers must be a positive integer if provided"
+            _num_dec_out_layers = num_decoder_output_layers
+        else:
+            _num_dec_out_layers = _num_enc_matrices
+
+        assert _num_dec_out_layers > 0, "_num_dec_out_layers must be positive."
+
         self.activation_dim = activation_dim; self.dict_size = dict_size
-        self.num_encoder_layers_config = num_encoder_layers
-        self.num_encoder_layers_processed = _num_enc_matrices
+        self.num_encoder_layers_config = num_encoder_layers # Original config value
+        self.num_encoder_layers_processed = _num_enc_matrices # Actual number of matrices used
         self.latent_processor = latent_processor
         self.code_normalization = CodeNormalization.from_string(code_normalization) if isinstance(code_normalization, str) else code_normalization
         self.code_normalization_alpha_sae = code_normalization_alpha_sae
@@ -604,6 +644,7 @@ class CrossCoder(Dictionary, nn.Module):
             "code_normalization": self.code_normalization.name,
             "code_normalization_alpha_sae": code_normalization_alpha_sae,
             "code_normalization_alpha_cc": code_normalization_alpha_cc,
+            "use_sparse_decoder": use_sparse_decoder,
         }
         self.encoder = CrossCoderEncoder(
             activation_dim, dict_size, num_layers=_num_enc_matrices,
@@ -620,7 +661,7 @@ class CrossCoder(Dictionary, nn.Module):
         self.decoder = CrossCoderDecoder(
             activation_dim, dict_size, _num_dec_out_layers, decoder_type=decoder_type,
             same_init_for_all_layers=same_init_for_all_layers, init_with_weight=dec_init_w,
-            norm_init_scale=norm_init_scale)
+            norm_init_scale=norm_init_scale, use_sparse_decoder=use_sparse_decoder)
         self.register_buffer("code_normalization_id", th.tensor(self.code_normalization.value))
         self.decoupled_code = self.code_normalization == CodeNormalization.DECOUPLED
 
@@ -663,57 +704,53 @@ class CrossCoder(Dictionary, nn.Module):
 
     @classmethod
     def from_pretrained(cls, path_or_model_id, dtype=th.float32, device=None, from_hub=False, config=None, **kwargs):
-        cfg_init = config if config is not None else kwargs.get("config", {})
-        def _resolve_arg(name, default_val=None, is_enum=False, enum_cls=None):
-            val_kwarg = kwargs.get(name); val_cfg = cfg_init.get(name)
-            val = val_kwarg if val_kwarg is not None else val_cfg
-            if val is None and default_val is not None: val = default_val
-            if is_enum and isinstance(val, str) and enum_cls is not None: return enum_cls.from_string(val)
-            return val
-        init_args = {
-            "activation_dim": _resolve_arg("activation_dim"), "dict_size": _resolve_arg("dict_size"),
-            "num_encoder_layers": _resolve_arg("num_encoder_layers"),
-            "decoder_type": _resolve_arg("decoder_type", "linear"),
-            "same_init_for_all_layers": _resolve_arg("same_init_for_all_layers", False),
-            "norm_init_scale": _resolve_arg("norm_init_scale"),
-            "init_with_transpose": _resolve_arg("init_with_transpose", True),
-            "encoder_layers_indices": _resolve_arg("encoder_layers_indices"),
-            "num_decoder_output_layers": _resolve_arg("num_decoder_output_layers"),
-            "code_normalization": _resolve_arg("code_normalization", CodeNormalization.CROSSCODER, True, CodeNormalization),
-            "code_normalization_alpha_sae": _resolve_arg("code_normalization_alpha_sae", 1.0),
-            "code_normalization_alpha_cc": _resolve_arg("code_normalization_alpha_cc", 0.1),}
-        if 'latent_processor' in kwargs: init_args['latent_processor'] = kwargs['latent_processor']
-        if not all([init_args["activation_dim"], init_args["dict_size"], init_args["num_encoder_layers"]]):
-            if not from_hub and path_or_model_id:
-                try:
-                    sd = th.load(path_or_model_id, map_location='cpu', weights_only=True)
-                    if "_hub_mixin_config" in sd : cfg_init.update(sd["_hub_mixin_config"])
-                    for name in ["activation_dim", "dict_size", "num_encoder_layers", "decoder_type",
-                                 "encoder_layers_indices", "num_decoder_output_layers", "code_normalization"]:
-                        if init_args.get(name) is None:
-                            val = cfg_init.get(name)
-                            if name == "code_normalization" and isinstance(val, str): val = CodeNormalization.from_string(val)
-                            elif name == "code_normalization" and val is None: val = CodeNormalization.CROSSCODER
-                            init_args[name] = val
-                    if not all([init_args["activation_dim"], init_args["dict_size"], init_args["num_encoder_layers"]]):
-                        num_enc_mats_sd, act_dim_sd, dict_size_sd = sd["encoder.weight"].shape
-                        if init_args["activation_dim"] is None: init_args["activation_dim"] = act_dim_sd
-                        if init_args["dict_size"] is None: init_args["dict_size"] = dict_size_sd
-                        if init_args["num_encoder_layers"] is None:
-                            eli_sd = init_args.get("encoder_layers_indices")
-                            init_args["num_encoder_layers"] = len(eli_sd) if eli_sd else num_enc_mats_sd
-                except Exception as e:
-                    raise ValueError(f"Could not load/infer params from local {path_or_model_id} for CrossCoder: {e}")
-            if not all([init_args["activation_dim"], init_args["dict_size"], init_args["num_encoder_layers"]]):
-                raise ValueError("activation_dim, dict_size, num_encoder_layers must be provided or inferable.")
-        final_cfg_for_hub = cfg_init.copy(); final_cfg_for_hub.update(init_args)
-        if isinstance(final_cfg_for_hub.get("code_normalization"), CodeNormalization):
-             final_cfg_for_hub["code_normalization"] = str(final_cfg_for_hub["code_normalization"])
-        if 'latent_processor' in final_cfg_for_hub: del final_cfg_for_hub['latent_processor']
+        cfg = config if config is not None else kwargs.get("config", {})
+
+        # Consolidate model parameters directly from cfg or kwargs
+        model_params = {
+            "activation_dim": cfg.get("activation_dim", kwargs.get("activation_dim")),
+            "dict_size": cfg.get("dict_size", kwargs.get("dict_size")),
+            "num_encoder_layers": cfg.get("num_encoder_layers", kwargs.get("num_encoder_layers")),
+            "decoder_type": cfg.get("decoder_type", kwargs.get("decoder_type", "linear")),
+            "same_init_for_all_layers": cfg.get("same_init_for_all_layers", kwargs.get("same_init_for_all_layers", False)),
+            "norm_init_scale": cfg.get("norm_init_scale", kwargs.get("norm_init_scale")),
+            "init_with_transpose": cfg.get("init_with_transpose", kwargs.get("init_with_transpose", True)),
+            "encoder_layers_indices": cfg.get("encoder_layers_indices", kwargs.get("encoder_layers_indices")),
+            "num_decoder_output_layers": cfg.get("num_decoder_output_layers", kwargs.get("num_decoder_output_layers")),
+            "code_normalization": cfg.get("code_normalization", kwargs.get("code_normalization", CodeNormalization.CROSSCODER)),
+            "code_normalization_alpha_sae": cfg.get("code_normalization_alpha_sae", kwargs.get("code_normalization_alpha_sae", 1.0)),
+            "code_normalization_alpha_cc": cfg.get("code_normalization_alpha_cc", kwargs.get("code_normalization_alpha_cc", 0.1)),
+            "use_sparse_decoder": cfg.get("use_sparse_decoder", kwargs.get("use_sparse_decoder", True)),
+        }
+        if 'latent_processor' in kwargs: # latent_processor is not typically stored in config
+            model_params['latent_processor'] = kwargs['latent_processor']
+
+        if not all(model_params.get(key) is not None for key in ["activation_dim", "dict_size", "num_encoder_layers"]):
+            raise ValueError("activation_dim, dict_size, and num_encoder_layers must be provided in config or kwargs for CrossCoder.")
+
+        # Ensure code_normalization is an enum instance for the constructor if passed as string
+        if isinstance(model_params["code_normalization"], str):
+            model_params["code_normalization"] = CodeNormalization.from_string(model_params["code_normalization"])
+
+        # Prepare config for PyTorchModelHubMixin (super().from_pretrained)
+        # It should contain all necessary fields for __init__ that are part of _hub_mixin_config
+        hub_config_params = model_params.copy()
+        if isinstance(hub_config_params["code_normalization"], CodeNormalization): # Convert enum to string for JSON serializability
+            hub_config_params["code_normalization"] = str(hub_config_params["code_normalization"])
+        if 'latent_processor' in hub_config_params: # Not part of _hub_mixin_config
+            del hub_config_params['latent_processor']
+
+        # Update the passed cfg, or initialize if it was None
+        if config is None: config = {}
+        config.update(hub_config_params)
+
+
         if from_hub:
-            model = super(CrossCoder, cls).from_pretrained(path_or_model_id, config=final_cfg_for_hub, **kwargs) # type: ignore
+            # kwargs for super().from_pretrained should not include model_params already in config
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k not in hub_config_params}
+            model = super(CrossCoder, cls).from_pretrained(path_or_model_id, config=config, **filtered_kwargs) # type: ignore
         else:
-            instance = cls(**init_args) # type: ignore
+            instance = cls(**model_params) # type: ignore
             state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
             if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
             instance.load_state_dict(state_dict)
@@ -728,16 +765,45 @@ class BatchTopKCrossCoder(CrossCoder):
         k: Union[int, th.Tensor] = 100,
         norm_init_scale: float = 1.0,
         decoder_type: str = "linear",
+        use_sparse_decoder: bool = True, # Added here
         **kwargs, ):
+        # Basic type checks for BatchTopKCrossCoder specific parameters
+        assert isinstance(k, (int, th.Tensor)), "k must be an int or Tensor"
+        if isinstance(k, th.Tensor):
+            assert k.ndim == 0, "k tensor must be a scalar"
+            k_val_for_check = k.item()
+        else: # k is int
+            k_val_for_check = k
+        assert isinstance(k_val_for_check, int) and k_val_for_check > 0, "k must be a positive integer value"
+        assert isinstance(norm_init_scale, (float, int)), "norm_init_scale must be a float or int"
+        assert isinstance(use_sparse_decoder, bool), "use_sparse_decoder must be a boolean" # Added assertion
+
+        # Ensure 'code_normalization' from kwargs is resolved before passing to super_init
         code_norm_kwarg = kwargs.get('code_normalization', CodeNormalization.CROSSCODER)
-        resolved_code_norm = CodeNormalization.from_string(code_norm_kwarg) if isinstance(code_norm_kwarg, str) else code_norm_kwarg
+        if isinstance(code_norm_kwarg, str):
+            resolved_code_norm = CodeNormalization.from_string(code_norm_kwarg)
+        elif isinstance(code_norm_kwarg, CodeNormalization):
+            resolved_code_norm = code_norm_kwarg
+        else:
+            raise TypeError("code_normalization in kwargs must be a string or CodeNormalization enum")
         kwargs['code_normalization'] = resolved_code_norm
+
         super().__init__(
             activation_dim, dict_size, num_encoder_layers,
-            decoder_type=decoder_type, norm_init_scale=norm_init_scale, **kwargs)
-        k_val = k if isinstance(k,int) else k.item()
-        self._hub_mixin_config.update({"k": k_val})
+            decoder_type=decoder_type, norm_init_scale=norm_init_scale,
+            use_sparse_decoder=use_sparse_decoder, # Pass to super
+            **kwargs)
+
+        # k_val is derived for _hub_mixin_config and k_tensor registration
+        k_val = k.item() if isinstance(k, th.Tensor) else k
+
+        # Update hub_mixin_config with resolved k_val and use_sparse_decoder
+        self._hub_mixin_config.update({"k": k_val, "use_sparse_decoder": use_sparse_decoder})
+
+        # Register k as a buffer
         self.k_tensor = th.tensor(k_val, dtype=th.int) if not isinstance(k, th.Tensor) else k.to(th.int)
+        # Ensure self.k is positive after potential tensor conversion
+        assert self.k_tensor.item() > 0, "Registered k tensor must be positive"
         self.register_buffer("k", self.k_tensor)
         thresh_init_val = [-1.0]*self.num_encoder_layers_processed if self.decoupled_code else -1.0
         self.register_buffer("threshold", th.tensor(thresh_init_val, dtype=th.float32))
@@ -795,56 +861,64 @@ class BatchTopKCrossCoder(CrossCoder):
 
     @classmethod
     def from_pretrained(cls, path_or_model_id, dtype=th.float32, device=None, from_hub=False, config=None, **kwargs):
-        cfg_init = config if config is not None else kwargs.get("config", {})
-        def _resolve_arg_btkcc(name, default_val=None, is_enum=False, enum_cls=None):
-            val_kwarg = kwargs.get(name); val_cfg = cfg_init.get(name)
-            val = val_kwarg if val_kwarg is not None else val_cfg
-            if val is None and default_val is not None: val = default_val
-            if is_enum and isinstance(val, str) and enum_cls is not None: return enum_cls.from_string(val)
-            return val
-        init_args_btkcc = {
-            "activation_dim": _resolve_arg_btkcc("activation_dim"), "dict_size": _resolve_arg_btkcc("dict_size"),
-            "num_encoder_layers": _resolve_arg_btkcc("num_encoder_layers"), "k": _resolve_arg_btkcc("k", 100),
-            "norm_init_scale": _resolve_arg_btkcc("norm_init_scale", 1.0),
-            "decoder_type": _resolve_arg_btkcc("decoder_type", "linear"),}
-        cc_arg_names = ["same_init_for_all_layers", "init_with_transpose", "encoder_layers_indices",
-                        "num_decoder_output_layers", "code_normalization",
-                        "code_normalization_alpha_sae", "code_normalization_alpha_cc", "latent_processor"]
-        for name in cc_arg_names: init_args_btkcc[name] = _resolve_arg_btkcc(name)
-        if not all([init_args_btkcc["activation_dim"], init_args_btkcc["dict_size"], init_args_btkcc["num_encoder_layers"]]):
-            if not from_hub and path_or_model_id:
-                try:
-                    sd = th.load(path_or_model_id, map_location='cpu', weights_only=True)
-                    if "_hub_mixin_config" in sd : cfg_init.update(sd["_hub_mixin_config"])
-                    for name_key in init_args_btkcc:
-                        is_enum = name_key == "code_normalization"; enum_c = CodeNormalization if is_enum else None
-                        default = 100 if name_key == "k" else (1.0 if name_key == "norm_init_scale" else ("linear" if name_key == "decoder_type" else None))
-                        init_args_btkcc[name_key] = _resolve_arg_btkcc(name_key, default, is_enum, enum_c)
-                    if not all([init_args_btkcc["activation_dim"], init_args_btkcc["dict_size"], init_args_btkcc["num_encoder_layers"]]):
-                        num_enc_mats_sd, act_dim_sd, dict_size_sd = sd["encoder.weight"].shape
-                        if init_args_btkcc["activation_dim"] is None: init_args_btkcc["activation_dim"] = act_dim_sd
-                        if init_args_btkcc["dict_size"] is None: init_args_btkcc["dict_size"] = dict_size_sd
-                        if init_args_btkcc["num_encoder_layers"] is None:
-                            eli_sd = init_args_btkcc.get("encoder_layers_indices")
-                            init_args_btkcc["num_encoder_layers"] = len(eli_sd) if eli_sd else num_enc_mats_sd
-                except Exception as e:
-                     raise ValueError(f"Could not load/infer params from local {path_or_model_id} for BTKCC: {e}")
-            if not all([init_args_btkcc["activation_dim"], init_args_btkcc["dict_size"], init_args_btkcc["num_encoder_layers"], init_args_btkcc.get("k") is not None]):
-                raise ValueError("activation_dim, dict_size, num_encoder_layers, k must be provided or inferable.")
-        final_cfg_for_hub = cfg_init.copy(); final_cfg_for_hub.update(init_args_btkcc)
-        if isinstance(final_cfg_for_hub.get("code_normalization"), CodeNormalization):
-            final_cfg_for_hub["code_normalization"] = str(final_cfg_for_hub["code_normalization"])
-        if 'latent_processor' in final_cfg_for_hub: del final_cfg_for_hub['latent_processor']
-        super_kwargs_init = {k:v for k,v in kwargs.items() if k not in init_args_btkcc}
+        cfg = config if config is not None else kwargs.get("config", {})
+
+        # Consolidate model parameters directly from cfg or kwargs
+        # These are parameters for BatchTopKCrossCoder's __init__ or its parent CrossCoder's __init__
+        model_params = {
+            "activation_dim": cfg.get("activation_dim", kwargs.get("activation_dim")),
+            "dict_size": cfg.get("dict_size", kwargs.get("dict_size")),
+            "num_encoder_layers": cfg.get("num_encoder_layers", kwargs.get("num_encoder_layers")),
+            "k": cfg.get("k", kwargs.get("k", 100)), # BTKCC specific
+            "norm_init_scale": cfg.get("norm_init_scale", kwargs.get("norm_init_scale", 1.0)), # BTKCC specific default
+            "decoder_type": cfg.get("decoder_type", kwargs.get("decoder_type", "linear")), # CrossCoder param
+            "same_init_for_all_layers": cfg.get("same_init_for_all_layers", kwargs.get("same_init_for_all_layers", False)),
+            "init_with_transpose": cfg.get("init_with_transpose", kwargs.get("init_with_transpose", True)),
+            "encoder_layers_indices": cfg.get("encoder_layers_indices", kwargs.get("encoder_layers_indices")),
+            "num_decoder_output_layers": cfg.get("num_decoder_output_layers", kwargs.get("num_decoder_output_layers")),
+            "code_normalization": cfg.get("code_normalization", kwargs.get("code_normalization", CodeNormalization.CROSSCODER)),
+            "code_normalization_alpha_sae": cfg.get("code_normalization_alpha_sae", kwargs.get("code_normalization_alpha_sae", 1.0)),
+            "code_normalization_alpha_cc": cfg.get("code_normalization_alpha_cc", kwargs.get("code_normalization_alpha_cc", 0.1)),
+            "use_sparse_decoder": cfg.get("use_sparse_decoder", kwargs.get("use_sparse_decoder", True)), # Added
+        }
+        if 'latent_processor' in kwargs: # latent_processor is not typically stored in config
+            model_params['latent_processor'] = kwargs['latent_processor']
+
+        # Check for essential parameters
+        if not all(model_params.get(key) is not None for key in ["activation_dim", "dict_size", "num_encoder_layers", "k"]):
+            raise ValueError("activation_dim, dict_size, num_encoder_layers, and k must be provided in config or kwargs for BatchTopKCrossCoder.")
+
+        # Ensure code_normalization is an enum instance for the constructor
+        if isinstance(model_params["code_normalization"], str):
+            model_params["code_normalization"] = CodeNormalization.from_string(model_params["code_normalization"])
+
+        # Prepare config for PyTorchModelHubMixin (super().from_pretrained)
+        # This should include all keys that are part of _hub_mixin_config in this class or its parents
+        hub_config_params = model_params.copy()
+        if isinstance(hub_config_params["code_normalization"], CodeNormalization):
+            hub_config_params["code_normalization"] = str(hub_config_params["code_normalization"])
+        if 'latent_processor' in hub_config_params: # Not part of _hub_mixin_config
+            del hub_config_params['latent_processor']
+
+        # Update the passed cfg, or initialize if it was None
+        if config is None: config = {}
+        config.update(hub_config_params)
+
+        # Separate kwargs for super from_pretrained vs cls constructor
+        # kwargs for super().from_pretrained should not include model_params already in config
+        filtered_super_kwargs = {k: v for k, v in kwargs.items() if k not in hub_config_params and k not in model_params}
+
+
         if from_hub:
-            model = super(BatchTopKCrossCoder, cls).from_pretrained(path_or_model_id, config=final_cfg_for_hub, **super_kwargs_init)
+            # `super(BatchTopKCrossCoder, cls)` calls `CrossCoder.from_pretrained`
+            # It needs the config to be set up correctly for CrossCoder and its own _hub_mixin_config additions (like 'k')
+            model = super(BatchTopKCrossCoder, cls).from_pretrained(path_or_model_id, config=config, **filtered_super_kwargs) # type: ignore
         else:
-            final_init_args_local = init_args_btkcc.copy()
-            if isinstance(final_init_args_local.get("code_normalization"), str):
-                 final_init_args_local["code_normalization"] = CodeNormalization.from_string(final_init_args_local["code_normalization"])
-            instance = cls(**final_init_args_local) # type: ignore
+            instance = cls(**model_params) # type: ignore
             state_dict = th.load(path_or_model_id, map_location=device if device else 'cpu', weights_only=True)
             if "_hub_mixin_config" in state_dict: del state_dict["_hub_mixin_config"]
+            # It's possible that the state_dict contains 'k' or 'threshold' if they were buffers.
+            # load_state_dict should handle registered buffers correctly.
             instance.load_state_dict(state_dict)
             model = instance
         model.to(dtype=dtype); # type: ignore
