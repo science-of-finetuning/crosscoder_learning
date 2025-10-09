@@ -35,7 +35,6 @@ def zst_to_generator(data_path):
 
 
 NUMPY_TO_TORCH_DTYPE_DICT = {
-    np.bool: th.bool,
     np.uint8: th.uint8,
     np.int8: th.int8,
     np.int16: th.int16,
