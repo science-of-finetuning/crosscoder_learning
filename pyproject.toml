@@ -13,7 +13,6 @@ name = "dictionary_learning"
 description = "A package for dictionary learning via sparse autoencoders on neural network activations"
 readme = "README.md"
 keywords = ["dictionary learning", "sparse autoencoder", "neural networks"]
-license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
