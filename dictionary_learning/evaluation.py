@@ -34,7 +34,6 @@ def loss_recovered(
     # unmodified logits
     with model.trace(text, invoker_args=invoker_args):
         logits_original = model.output.save()
-    logits_original = logits_original.value
 
     # logits when replacing component activations with reconstruction by autoencoder
     with model.trace(text, **tracer_args, invoker_args=invoker_args):
@@ -97,7 +96,6 @@ def loss_recovered(
             raise ValueError(f"Invalid value for io: {io}")
 
         logits_reconstructed = model.output.save()
-    logits_reconstructed = logits_reconstructed.value
 
     # logits when replacing component activations with zeros
     with model.trace(text, **tracer_args, invoker_args=invoker_args):
@@ -118,7 +116,6 @@ def loss_recovered(
 
         input = model.input.save()
         logits_zero = model.output.save()
-    logits_zero = logits_zero.value
 
     # get everything into the right format
     try:

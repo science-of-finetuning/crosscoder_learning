@@ -131,8 +131,7 @@ class ActivationBuffer:
                     else:
                         hidden_states = self.submodule.output.save()
                     input = self.model.input.save()
-            attn_mask = input.value[1]["attention_mask"]
-            hidden_states = hidden_states.value
+            attn_mask = input[1]["attention_mask"]
             if isinstance(hidden_states, tuple):
                 hidden_states = hidden_states[0]
             hidden_states = hidden_states[attn_mask != 0]
@@ -303,7 +302,7 @@ class HeadActivationBuffer:
                         )
 
             # Apply attention mask
-            attn_mask = input.value[1]["attention_mask"]
+            attn_mask = input[1]["attention_mask"]
             hidden_states = hidden_states[attn_mask != 0]
 
             # Save results
@@ -441,7 +440,6 @@ class NNsightActivationBuffer:
         return self.token_batch(batch_size)
 
     def _reshaped_activations(self, hidden_states):
-        hidden_states = hidden_states.value
         if isinstance(hidden_states, tuple):
             hidden_states = hidden_states[0]
         batch_size, seq_len, d_model = hidden_states.shape

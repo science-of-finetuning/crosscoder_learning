@@ -386,9 +386,12 @@ class ActivationCache:
     @staticmethod
     def get_activations(submodule: nn.Module, io: str):
         if io == "in":
-            return submodule.input[0]
+            x = submodule.input
         else:
-            return submodule.output[0]
+            x = submodule.output
+        if isinstance(x, tuple):
+            return x[0]
+        return x
 
     @staticmethod
     def __init_multiprocessing(max_concurrent_saves: int = 3):
@@ -588,8 +591,6 @@ class ActivationCache:
                 return_tensors="pt",
                 padding=True,
                 add_special_tokens=add_special_tokens,
-            ).to(
-                model.device
             )  # (B, T)
 
             if token_level_replacement is not None:
@@ -653,8 +654,7 @@ class ActivationCache:
 
                 for i in range(len(submodules)):
                     activation_cache[i][-1] = (
-                        activation_cache[i][-1]
-                        .value[store_mask.reshape(-1).bool()]
+                        activation_cache[i][-1][store_mask.reshape(-1).bool()]
                         .cpu()
                     )  # remove padding tokens
                     running_stats[i].update(activation_cache[i][-1].view(-1, d_model))

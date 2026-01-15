@@ -38,9 +38,9 @@ def feature_effect(
                 submodule.output = dictionary(submodule.output)
         clean_output = model.output.save()
     try:
-        clean_logits = clean_output.value.logits[:, -1, :]
+        clean_logits = clean_output.logits[:, -1, :]
     except:
-        clean_logits = clean_output.value[:, -1, :]
+        clean_logits = clean_output[:, -1, :]
     clean_logprobs = t.nn.functional.log_softmax(clean_logits, dim=-1)
 
     # ablated run
@@ -69,9 +69,9 @@ def feature_effect(
                 submodule.output = x_hat
         ablated_output = model.output.save()
     try:
-        ablated_logits = ablated_output.value.logits[:, -1, :]
+        ablated_logits = ablated_output.logits[:, -1, :]
     except:
-        ablated_logits = ablated_output.value[:, -1, :]
+        ablated_logits = ablated_output[:, -1, :]
     ablated_logprobs = t.nn.functional.log_softmax(ablated_logits, dim=-1)
 
     diff = clean_logprobs - ablated_logprobs
@@ -117,10 +117,8 @@ def examine_dimension(
         if dictionary is not None:
             activations = dictionary.encode(activations)
         activations = activations[:, :, dim_idx].save()
-    activations = activations.value
 
     # get top k tokens by mean activation
-    tokens = tokens.value
     token_mean_acts = {}
     for ctx in tokens:
         for tok in ctx:
