@@ -653,10 +653,9 @@ class ActivationCache:
                         last_submodule.output.stop()
 
                 for i in range(len(submodules)):
-                    activation_cache[i][-1] = (
-                        activation_cache[i][-1][store_mask.reshape(-1).bool()]
-                        .cpu()
-                    )  # remove padding tokens
+                    activation_cache[i][-1] = activation_cache[i][-1][
+                        store_mask.reshape(-1).bool()
+                    ].cpu()  # remove padding tokens
                     running_stats[i].update(activation_cache[i][-1].view(-1, d_model))
                     if dtype is not None:
                         activation_cache[i][-1] = activation_cache[i][-1].to(dtype)
