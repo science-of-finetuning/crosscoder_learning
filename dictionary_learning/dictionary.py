@@ -162,6 +162,17 @@ class Dictionary(ABC, nn.Module, PyTorchModelHubMixin):
         """
         pass
 
+    def save_pretrained(self, *args, **kwargs):
+        """Save model with dict_class in config for local loading."""
+        self._hub_mixin_config["dict_class"] = type(self).__name__
+        return super().save_pretrained(*args, **kwargs)
+
+    @classmethod
+    def _from_pretrained(cls, *, model_id, **kwargs):
+        """Strip dict_class from config before instantiation."""
+        kwargs.pop("dict_class", None)
+        return super()._from_pretrained(model_id=model_id, **kwargs)
+
     @classmethod
     @abstractmethod
     def from_pretrained(
